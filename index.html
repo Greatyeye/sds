@@ -871,7 +871,7 @@
         // ===== 默认加载 5 张（同目录 p1.jpg~p5.jpg）；加载失败不报错 =====
         let loadedPhotos = [];
         async function tryLoadDefaultPhotos(){
-            const urls = ['p1.jpg','p2.jpg','p3.jpg','p4.jpg','p5.jpg'];
+            const urls = ['./p1.jpg','./p2.jpg','./p3.jpg','./p4.jpg','./p5.jpg'];
             try{
                 const imgs = await Promise.all(urls.map(u => loadImage(u)));
                 loadedPhotos = imgs;
