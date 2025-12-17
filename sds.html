@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>圣诞树 · 照片挂件可放大</title>
+    <style>
+        html,body{margin:0;height:100%;overflow:hidden;}
+        body{background: radial-gradient(ellipse at bottom, #1b2735 0%, #07080c 100%);}
+
+        canvas{position:fixed;left:0;top:0;width:100vw;height:100vh;display:block;z-index:0;}
+
+        #message{
+            position:fixed; left:0; right:0; bottom:12%;
+            text-align:center; font-size:clamp(26px,4vw,52px);
+            letter-spacing:.32em; font-weight:300; color:rgba(255,255,255,.9);
+            text-shadow:0 0 14px rgba(255,255,255,.35),0 0 28px rgba(255,160,210,.16);
+            pointer-events:none; user-select:none; font-family:"Times New Roman", serif;
+            animation: breath 4.2s ease-in-out infinite; z-index:10;
+        }
+        @keyframes breath{0%,100%{opacity:.72;transform:translateY(0) scale(1)}50%{opacity:1;transform:translateY(-2px) scale(1.03)}}
+
+        .vignette{
+            position:fixed; inset:0; pointer-events:none;
+            background: radial-gradient(ellipse at center, rgba(0,0,0,0) 0%, rgba(0,0,0,.38) 70%, rgba(0,0,0,.62) 100%);
+            mix-blend-mode:multiply; z-index:2;
+        }
+
+        .hint{position:fixed;left:14px;bottom:14px;color:rgba(255,255,255,.55);font-size:12px;letter-spacing:.06em;user-select:none;pointer-events:none;z-index:10;}
+
+        /* 右上角加载按钮 */
+        #toolbar{position:fixed;right:14px;top:14px;z-index:20;display:flex;gap:10px;align-items:center;}
+        #btnLoad{
+            background:rgba(255,255,255,.10);
+            border:1px solid rgba(255,255,255,.18);
+            color:rgba(255,255,255,.88);
+            padding:10px 12px;
+            border-radius:12px;
+            font-size:13px;
+            letter-spacing:.08em;
+            cursor:pointer;
+            backdrop-filter: blur(6px);
+        }
+        #btnLoad:hover{background:rgba(255,255,255,.16)}
+        #photoPicker{display:none;}
+
+        /* 点击放大预览 */
+        #viewer{
+            position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+            background:rgba(0,0,0,.72);
+            backdrop-filter: blur(8px);
+            z-index:999;
+            padding:24px;
+        }
+        #viewer.show{display:flex;}
+        #viewer img{
+            max-width:min(92vw, 980px);
+            max-height:88vh;
+            border-radius:18px;
+            box-shadow:0 24px 90px rgba(0,0,0,.55);
+            background:rgba(255,255,255,.06);
+        }
+        #viewer .tip{
+            position:fixed; top:16px; left:16px;
+            color:rgba(255,255,255,.72); font-size:12px; letter-spacing:.08em;
+            user-select:none;
+        }
+    </style>
+</head>
+<body>
+<div id="message">Merry Christmas</div>
+
+<div id="toolbar">
+    <button id="btnLoad">加载照片</button>
+    <input id="photoPicker" type="file" accept="image/*" multiple />
+</div>
+
+<div class="hint">移动鼠标：轻轻转动 · 点击空白处：切换主题 · 点击照片：放大</div>
+<canvas id="c"></canvas>
+<div class="vignette"></div>
+
+<div id="viewer" title="点击关闭">
+    <div class="tip">点击任意位置关闭</div>
+    <img id="viewerImg" alt="preview" />
+</div>
+
+<script>
+    (() => {
+        // ===== 工具函数 =====
+        function rand(a,b){ return a + Math.random()*(b-a); }
+        function pick(arr){ return arr[(Math.random()*arr.length)|0]; }
+        function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+        function roundRectPath(g, x,y,w,h,r){
+            r = Math.min(r, w*0.5, h*0.5);
+            g.beginPath();
+            g.moveTo(x+r, y);
+            g.arcTo(x+w, y, x+w, y+h, r);
+            g.arcTo(x+w, y+h, x, y+h, r);
+            g.arcTo(x, y+h, x, y, r);
+            g.arcTo(x, y, x+w, y, r);
+            g.closePath();
+        }
+
+        function loadImage(src){
+            return new Promise((resolve,reject)=>{
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = ()=>resolve(img);
+                img.onerror = ()=>reject(new Error('load failed: ' + src));
+                img.src = src;
+            });
+        }
+
+        // cover 裁切绘制
+        function drawImageCover(g, img, x,y,w,h){
+            const ir = img.width / img.height;
+            const tr = w / h;
+            let sx=0, sy=0, sw=img.width, sh=img.height;
+            if (ir > tr){
+                // 图片更宽：裁两侧
+                sh = img.height;
+                sw = sh * tr;
+                sx = (img.width - sw)/2;
+            }else{
+                // 图片更高：裁上下
+                sw = img.width;
+                sh = sw / tr;
+                sy = (img.height - sh)/2;
+            }
+            g.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+        }
+
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+
+        // 预览相关
+        const viewer = document.getElementById('viewer');
+        const viewerImg = document.getElementById('viewerImg');
+        function openViewer(src){
+            viewerImg.src = src;
+            viewer.classList.add('show');
+        }
+        function closeViewer(){
+            viewer.classList.remove('show');
+            viewerImg.src = '';
+        }
+        viewer.addEventListener('click', closeViewer);
+
+        // ===== 配置 =====
+        const CFG = {
+            theme: 'classic',
+            layers: 82,
+            maxRadius: 255,
+            yTop: -285,
+            yStep: 6.5,
+
+            needlePerPoint: 2,
+            needleLenMin: 8,
+            needleLenMax: 18,
+            needleAlpha: 0.95,
+
+            bodyAlpha: 0.085,
+            lightDensity: 0.12,
+            ornamentDensity: 0.02,
+
+            snowCount: 150,
+            starCount: 120,
+
+            lightSize: 22,
+            ornamentSize: 26,
+
+            treeSnowCount: 260,
+            giftCount: 14,
+
+            skySleighCount: 1,
+            skySleighSpeed: [60, 110],
+            auroraStrength: 1.15,
+
+            // 照片挂件大小（基础）
+            photoBase: 70,
+        };
+
+        const THEMES = {
+            classic: {
+                leafHue: [130, 150], leafSat:[52,66], leafLum:[14,24],
+                lights: ['#ff3b3b','#ffd36a','#ffffff','#70ffd2'],
+                string: 'rgba(255, 210, 140, 0.38)',
+                ornaments: ['#ff3b3b','#ffd36a','#ffffff'],
+                gifts: [['#d94141', '#f3d37a'],['#2fa36c', '#ffd36a'],['#3a76ff', '#ffffff'],['#b24cff', '#ff78c9']],
+                aurora: ['rgba(120,255,220,', 'rgba(255,220,140,', 'rgba(180,220,255,', 'rgba(255,120,120,']
+            },
+            romantic: {
+                leafHue: [140, 160], leafSat:[48,64], leafLum:[14,22],
+                lights: ['#ffd36a','#ff78c9','#b48bff','#58e7ff','#fff2cc'],
+                string: 'rgba(255, 140, 210, 0.32)',
+                ornaments: ['#ff4d6d','#ffcc66','#58e7ff','#c29bff'],
+                gifts: [['#ff78c9', '#fff2cc'],['#b48bff', '#58e7ff'],['#ffcc66', '#ffffff'],['#58e7ff', '#ffd36a']],
+                aurora: ['rgba(255,120,200,', 'rgba(180,140,255,', 'rgba(90,235,255,', 'rgba(255,220,180,']
+            }
+        };
+
+        let themeName = CFG.theme;
+        let theme = THEMES[themeName];
+
+        let W=0,H=0,DPR=1;
+        function resize(){
+            DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+            const rect = canvas.getBoundingClientRect();
+            W = rect.width; H = rect.height;
+            canvas.width = Math.floor(W*DPR);
+            canvas.height = Math.floor(H*DPR);
+            ctx.setTransform(DPR,0,0,DPR,0,0);
+            buildBackground();
+        }
+        addEventListener('resize', resize, {passive:true});
+
+        const mouse = {x:0,y:0,tx:0,ty:0};
+        addEventListener('mousemove', e => {
+            mouse.tx = (e.clientX/W)*2 - 1;
+            mouse.ty = (e.clientY/H)*2 - 1;
+        }, {passive:true});
+
+        // ===== 贴图（发光/装饰/雪/礼物/雪橇） =====
+        function hexToRgb(hex){
+            const h=hex.replace('#','');
+            const n=parseInt(h.length===3? h.split('').map(c=>c+c).join(''):h,16);
+            return {r:(n>>16)&255,g:(n>>8)&255,b:n&255};
+        }
+
+        function glowSprite(color, size=72){
+            const c=document.createElement('canvas'); c.width=c.height=size;
+            const g=c.getContext('2d');
+            const {r,g:gg,b}=hexToRgb(color);
+            const cx=size/2,cy=size/2,rad=size/2;
+            const grad=g.createRadialGradient(cx,cy,0,cx,cy,rad);
+            grad.addColorStop(0,   `rgba(${r},${gg},${b},1)`);
+            grad.addColorStop(0.25,`rgba(${r},${gg},${b},0.9)`);
+            grad.addColorStop(0.62,`rgba(${r},${gg},${b},0.18)`);
+            grad.addColorStop(1,   `rgba(${r},${gg},${b},0)`);
+            g.fillStyle=grad; g.beginPath(); g.arc(cx,cy,rad,0,Math.PI*2); g.fill();
+            return c;
+        }
+
+        function ornamentSprite(color, size=88){
+            const c=document.createElement('canvas'); c.width=c.height=size;
+            const g=c.getContext('2d');
+            const {r,g:gg,b}=hexToRgb(color);
+            const cx=size/2,cy=size/2,rad=size*0.34;
+            let body=g.createRadialGradient(cx-rad*0.35,cy-rad*0.35,rad*0.08,cx,cy,rad);
+            body.addColorStop(0,'rgba(255,255,255,0.95)');
+            body.addColorStop(0.2,`rgba(${r},${gg},${b},0.95)`);
+            body.addColorStop(1,'rgba(0,0,0,0.25)');
+            g.fillStyle=body; g.beginPath(); g.arc(cx,cy,rad,0,Math.PI*2); g.fill();
+            g.save(); g.translate(cx-rad*0.35, cy-rad*0.25); g.rotate(-0.6); g.scale(1,0.65);
+            g.fillStyle='rgba(255,255,255,0.45)'; g.beginPath(); g.arc(0,0,rad*0.22,0,Math.PI*2); g.fill();
+            g.restore();
+            const glow=g.createRadialGradient(cx,cy,rad*0.2,cx,cy,rad*1.4);
+            glow.addColorStop(0,`rgba(${r},${gg},${b},0.20)`); glow.addColorStop(1,'rgba(0,0,0,0)');
+            g.fillStyle=glow; g.beginPath(); g.arc(cx,cy,rad*1.4,0,Math.PI*2); g.fill();
+            return c;
+        }
+
+        function snowClumpSprite(size=64){
+            const c=document.createElement('canvas'); c.width=c.height=size;
+            const g=c.getContext('2d');
+            const cx=size/2, cy=size/2, r=size/2;
+            const grad=g.createRadialGradient(cx,cy,0,cx,cy,r);
+            grad.addColorStop(0,'rgba(255,255,255,0.95)');
+            grad.addColorStop(0.25,'rgba(255,255,255,0.80)');
+            grad.addColorStop(0.6,'rgba(255,255,255,0.22)');
+            grad.addColorStop(1,'rgba(255,255,255,0)');
+            g.fillStyle=grad; g.beginPath(); g.arc(cx,cy,r,0,Math.PI*2); g.fill();
+            const grad2=g.createRadialGradient(cx,cy,r*0.2,cx,cy,r*1.1);
+            grad2.addColorStop(0,'rgba(180,230,255,0.10)');
+            grad2.addColorStop(1,'rgba(180,230,255,0)');
+            g.fillStyle=grad2; g.beginPath(); g.arc(cx,cy,r,0,Math.PI*2); g.fill();
+            return c;
+        }
+
+        function giftSprite(mainColor, ribbonColor, size=96){
+            const c=document.createElement('canvas'); c.width=c.height=size;
+            const g=c.getContext('2d');
+            const pad=size*0.18;
+            const x=pad, y=pad*1.15, w=size-2*pad, h=size-2*pad*1.25;
+
+            const grd=g.createLinearGradient(x,y,x+w,y+h);
+            grd.addColorStop(0, mainColor);
+            grd.addColorStop(1, 'rgba(0,0,0,0.15)');
+            g.fillStyle=grd; g.globalAlpha=0.95; roundRectPath(g, x,y,w,h, size*0.12); g.fill();
+
+            g.globalAlpha=0.98; g.fillStyle=mainColor;
+            roundRectPath(g, x, y-size*0.08, w, h*0.22, size*0.12); g.fill();
+
+            g.globalAlpha=0.95; g.fillStyle=ribbonColor;
+            roundRectPath(g, x+w*0.42, y-size*0.08, w*0.16, h+size*0.08, size*0.08); g.fill();
+            roundRectPath(g, x, y+h*0.38, w, h*0.16, size*0.08); g.fill();
+
+            g.globalAlpha=0.25; g.fillStyle='white';
+            g.beginPath();
+            g.moveTo(x+w*0.12, y+h*0.18);
+            g.lineTo(x+w*0.46, y+h*0.08);
+            g.lineTo(x+w*0.46, y+h*0.28);
+            g.closePath(); g.fill();
+
+            g.globalAlpha=0.95; g.fillStyle=ribbonColor;
+            const bx=x+w*0.5, by=y-size*0.12;
+            g.save(); g.translate(bx,by); g.rotate(-0.2);
+            g.scale(1,0.72);
+            g.beginPath(); g.arc(-size*0.12,0,size*0.10,0,Math.PI*2); g.fill();
+            g.beginPath(); g.arc(size*0.12,0,size*0.10,0,Math.PI*2); g.fill();
+            g.restore();
+            g.beginPath(); g.arc(bx,by,size*0.04,0,Math.PI*2); g.fill();
+
+            g.globalAlpha=0.18;
+            const glow=g.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+            glow.addColorStop(0,'rgba(255,255,255,0.18)');
+            glow.addColorStop(1,'rgba(255,255,255,0)');
+            g.fillStyle=glow; g.beginPath(); g.arc(size/2,size/2,size/2,0,Math.PI*2); g.fill();
+            return c;
+        }
+
+        // 更像的雪橇+麋鹿（剪影）
+        function makeSleighSprite(themeName){
+            const c = document.createElement('canvas');
+            c.width = 980;
+            c.height = 260;
+            const g = c.getContext('2d');
+
+            const baseY = 158;
+
+            const fog = g.createRadialGradient(760, 110, 0, 760, 110, 320);
+            fog.addColorStop(0, 'rgba(160,220,255,0.14)');
+            fog.addColorStop(1, 'rgba(160,220,255,0)');
+            g.fillStyle=fog; g.beginPath(); g.arc(760,110,320,0,Math.PI*2); g.fill();
+
+            function deer(x, y, s, ph){
+                g.save(); g.translate(x,y); g.scale(s,s);
+
+                g.fillStyle = 'rgba(20,24,34,0.92)';
+                g.save(); g.scale(1,0.62);
+                g.beginPath(); g.arc(0,0,22,0,Math.PI*2); g.fill();
+                g.restore();
+                g.beginPath(); g.arc(26,-10,10,0,Math.PI*2); g.fill();
+                g.beginPath(); g.arc(40,-18,7.2,0,Math.PI*2); g.fill();
+
+                const k = Math.sin(ph)*4;
+                g.strokeStyle = 'rgba(20,24,34,0.92)';
+                g.lineWidth = 5; g.lineCap='round';
+                g.beginPath();
+                g.moveTo(-10,14); g.lineTo(-16,42+k);
+                g.moveTo( -2,14); g.lineTo( -4,44-k);
+                g.moveTo(  8,14); g.lineTo( 10,42+k);
+                g.stroke();
+
+                g.strokeStyle = 'rgba(20,24,34,0.92)';
+                g.lineWidth = 4;
+                g.beginPath();
+                g.moveTo(44,-24); g.lineTo(52,-44);
+                g.moveTo(52,-44); g.lineTo(60,-38);
+                g.moveTo(52,-44); g.lineTo(48,-36);
+                g.moveTo(52,-44); g.lineTo(54,-30);
+                g.stroke();
+
+                g.globalCompositeOperation='lighter';
+                g.strokeStyle='rgba(255,255,255,0.12)';
+                g.lineWidth=3;
+                g.beginPath();
+                g.moveTo(-20,-2); g.quadraticCurveTo(6,-24,48,-20);
+                g.stroke();
+
+                g.fillStyle = 'rgba(255,110,110,0.55)';
+                g.beginPath(); g.arc(46,-16,5.6,0,Math.PI*2); g.fill();
+                g.fillStyle = 'rgba(255,220,220,0.45)';
+                g.beginPath(); g.arc(44,-18,2.2,0,Math.PI*2); g.fill();
+
+                g.globalCompositeOperation='source-over';
+                g.restore();
+            }
+
+            deer(120, baseY, 1.08, 0.0);
+            deer(260, baseY, 1.05, 1.1);
+            deer(400, baseY, 1.02, 2.2);
+            deer(540, baseY, 0.98, 3.2);
+
+            g.strokeStyle='rgba(255,255,255,0.22)';
+            g.lineWidth=2;
+            g.beginPath();
+            g.moveTo(585, baseY+10);
+            g.quadraticCurveTo(640, baseY+30, 700, baseY+46);
+            g.stroke();
+
+            g.save(); g.translate(780, baseY+58);
+
+            g.strokeStyle='rgba(20,24,34,0.92)';
+            g.lineWidth=7; g.lineCap='round';
+            g.beginPath();
+            g.moveTo(-90, 40);
+            g.quadraticCurveTo(-10, 60, 70, 28);
+            g.quadraticCurveTo(95, 18, 102, -4);
+            g.stroke();
+
+            g.fillStyle='rgba(20,24,34,0.92)';
+            roundRectPath(g, -78, -16, 140, 64, 18);
+            g.fill();
+
+            g.globalCompositeOperation='lighter';
+            g.strokeStyle='rgba(255,255,255,0.10)';
+            g.lineWidth=3;
+            g.beginPath();
+            g.moveTo(-70, 0);
+            g.quadraticCurveTo(-10, -30, 55, -6);
+            g.stroke();
+
+            const santaRed = (themeName === 'romantic') ? 'rgba(255,110,200,0.92)' : 'rgba(255,70,70,0.92)';
+            g.globalCompositeOperation='source-over';
+            g.fillStyle=santaRed;
+            g.beginPath(); g.arc(-10,-28,16,0,Math.PI*2); g.fill();
+            g.fillStyle='rgba(255,255,255,0.92)';
+            g.beginPath(); g.arc(-2,-44,8,0,Math.PI*2); g.fill();
+            g.fillStyle=santaRed;
+            g.beginPath();
+            g.moveTo(-18,-64); g.lineTo(12,-46); g.lineTo(-16,-38);
+            g.closePath(); g.fill();
+            g.fillStyle='rgba(255,255,255,0.92)';
+            g.beginPath(); g.arc(12,-46,5,0,Math.PI*2); g.fill();
+
+            g.fillStyle='rgba(255,255,255,0.14)';
+            roundRectPath(g, 30, -46, 44, 36, 12);
+            g.fill();
+
+            g.restore();
+            return c;
+        }
+
+        // ===== 背景 =====
+        let stars=[], snow=[];
+        function buildBackground(){
+            stars = Array.from({length:CFG.starCount}, () => ({
+                x: rand(0,W), y: rand(0,H*0.72), r: rand(0.6,2.2), a: rand(0.12,0.55), ph: rand(0,6.28)
+            }));
+            snow = Array.from({length:CFG.snowCount}, () => ({
+                x: rand(0,W), y: rand(-H,H), z: rand(-220,260),
+                r: rand(0.6,2.2), vy: rand(18,52), vx: rand(-10,10), ph: rand(0,6.28)
+            }));
+        }
+        function drawBackground(t){
+            ctx.globalCompositeOperation='source-over';
+            for(const s of stars){
+                const tw = 0.75 + 0.25*Math.sin(t*0.8 + s.ph);
+                ctx.globalAlpha = s.a*tw;
+                ctx.fillStyle = 'white';
+                ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,Math.PI*2); ctx.fill();
+            }
+            for(const f of snow){
+                const depth = (f.z+260)/520;
+                f.x += (f.vx + Math.sin(t*0.9+f.ph)*14) * depth * 0.016;
+                f.y += f.vy * (0.65+depth) * 0.016;
+                if(f.y>H+30 || f.x<-60 || f.x>W+60){
+                    f.x=rand(0,W); f.y=rand(-H*0.35,-10); f.z=rand(-220,260);
+                }
+                ctx.globalAlpha = 0.55*(0.25+depth);
+                ctx.fillStyle='white';
+                ctx.beginPath(); ctx.arc(f.x,f.y,f.r*(0.65+depth),0,Math.PI*2); ctx.fill();
+            }
+        }
+
+        function fillScaledEllipse(x,y,rx,ry,color,alpha){
+            ctx.save();
+            ctx.translate(x,y);
+            ctx.scale(1, ry/rx);
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.arc(0,0,rx,0,Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+
+        function drawStar(p, t){
+            ctx.globalCompositeOperation='lighter';
+            const s=p.s, x=p.x, y=p.y;
+            ctx.globalAlpha=0.7;
+            const R=115*s;
+            const g=ctx.createRadialGradient(x,y,0,x,y,R);
+            g.addColorStop(0,'rgba(255,250,220,0.95)');
+            g.addColorStop(0.35,'rgba(255,170,220,0.22)');
+            g.addColorStop(0.7,'rgba(120,240,255,0.16)');
+            g.addColorStop(1,'rgba(255,255,255,0)');
+            ctx.fillStyle=g;
+            ctx.beginPath(); ctx.arc(x,y,R,0,Math.PI*2); ctx.fill();
+
+            const pulse=0.86+0.14*Math.sin(t*2.2);
+            const R1=18*s*pulse, R2=8.5*s*pulse;
+            ctx.globalAlpha=0.95;
+            ctx.fillStyle='rgba(255,255,235,0.95)';
+            ctx.beginPath();
+            for(let i=0;i<10;i++){
+                const ang=-Math.PI/2 + (Math.PI/5)*i;
+                const rr = (i%2===0)?R1:R2;
+                const px=x+Math.cos(ang)*rr;
+                const py=y+Math.sin(ang)*rr;
+                if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+            }
+            ctx.closePath(); ctx.fill();
+
+            ctx.globalAlpha=0.45;
+            ctx.strokeStyle='rgba(255,255,255,0.85)';
+            ctx.lineWidth=Math.max(1,2*s);
+            ctx.beginPath();
+            ctx.moveTo(x-46*s,y); ctx.lineTo(x+46*s,y);
+            ctx.moveTo(x,y-46*s); ctx.lineTo(x,y+46*s);
+            ctx.stroke();
+        }
+
+        // ===== 3D 相机 & 投影 =====
+        const cam = { dist: 560, rotY: 0, rotX: 0, cy: -10 };
+        function project(x,y,z){
+            const cy=Math.cos(cam.rotY), sy=Math.sin(cam.rotY);
+            let x1=x*cy - z*sy;
+            let z1=z*cy + x*sy;
+            const cx=Math.cos(cam.rotX), sx=Math.sin(cam.rotX);
+            let y2=y*cx - z1*sx;
+            let z2=z1*cx + y*sx;
+            const s=cam.dist/(cam.dist+z2);
+            return { x: W*0.5 + x1*s, y: H*0.5 + (y2+cam.cy)*s, z:z2, s };
+        }
+
+        function drawString(points, strokeStyle){
+            ctx.strokeStyle = strokeStyle;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            let started=false;
+            for(const pt of points){
+                const p = project(pt.x,pt.y,pt.z);
+                if(p.s<=0) continue;
+                if(!started){ ctx.moveTo(p.x,p.y); started=true; }
+                else ctx.lineTo(p.x,p.y);
+            }
+            ctx.stroke();
+        }
+
+        // ===== 照片挂件（点击命中用） =====
+        const photoFrames = [];       // {img,x,y,z,base,phase,rot}
+        let photoRects = [];          // 每帧更新，用于点击命中：{x,y,w,h,s,src}
+
+        function drawPhotoFrame(img, cx, cy, w, h, alpha, tilt, glowBoost){
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(tilt);
+
+            // 阴影
+            ctx.shadowColor = 'rgba(0,0,0,0.45)';
+            ctx.shadowBlur = 18;
+            ctx.shadowOffsetY = 8;
+
+            // 相框底
+            const pad = Math.max(5, Math.min(w,h)*0.08);
+            const x = -w/2, y = -h/2;
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = 'rgba(255,255,255,0.10)';
+            roundRectPath(ctx, x, y, w, h, 14);
+            ctx.fill();
+
+            // 画照片（clip）
+            ctx.shadowColor = 'transparent';
+            ctx.save();
+            roundRectPath(ctx, x+pad, y+pad, w-2*pad, h-2*pad, 12);
+            ctx.clip();
+            drawImageCover(ctx, img, x+pad, y+pad, w-2*pad, h-2*pad);
+            ctx.restore();
+
+            // 边框高光
+            ctx.globalAlpha = alpha;
+            ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+            ctx.lineWidth = 1.5;
+            roundRectPath(ctx, x, y, w, h, 14);
+            ctx.stroke();
+
+            // 轻微发光（更像挂件）
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.globalAlpha = alpha * glowBoost;
+            ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+            ctx.lineWidth = 10;
+            roundRectPath(ctx, x+2, y+2, w-4, h-4, 14);
+            ctx.stroke();
+
+            ctx.restore();
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        // ===== 资源材质 =====
+        let mats = null;
+
+        function buildMats(){
+            const lights = theme.lights.map(c=>({c, spr: glowSprite(c, 72)}));
+            const orbs = theme.ornaments.map(c=>({c, spr: ornamentSprite(c, 88)}));
+            const snowSpr = snowClumpSprite(64);
+            const giftSpr = theme.gifts.map(([a,b]) => giftSprite(a,b,96));
+            const sleighSpr = makeSleighSprite(themeName);
+            const trailSpr = glowSprite('#fff2cc', 96);
+            return { lights, orbs, snowSpr, giftSpr, sleighSpr, trailSpr };
+        }
+
+        // ===== 天空雪橇（向左飞：麋鹿领头拉圣诞老人） =====
+        class SkySleigh {
+            constructor(getSprite, getTheme){
+                this.getSprite = getSprite;
+                this.getTheme = getTheme;
+                this.trail = [];
+                this.reset(true);
+            }
+            reset(first=false){
+                const spr = this.getSprite();
+                this.sprW = spr.width;
+                this.sprH = spr.height;
+
+                this.scale = rand(0.22, 0.34);
+                this.y = rand(H*0.10, H*0.26);
+
+                const sp = CFG.skySleighSpeed || [60,110];
+                this.speed = rand(sp[0], sp[1]);
+                this.phase = rand(0, Math.PI*2);
+
+                const margin = this.sprW*this.scale + 80;
+                this.x = first ? rand(-margin, W + margin) : (W + margin + rand(60, W*0.4));
+            }
+            update(t, dt){
+                this.x -= this.speed * dt;
+
+                const margin = this.sprW*this.scale + 100;
+                if (this.x < -margin) this.reset(false);
+
+                const bob = Math.sin(t*1.3 + this.phase) * 6;
+                const tailX = this.x + this.sprW*this.scale - 140*this.scale;
+                const tailY = this.y + bob + 150*this.scale;
+
+                this.trail.push({x:tailX, y:tailY, life:1});
+                if (this.trail.length > 64) this.trail.shift();
+                for (const p of this.trail) p.life -= dt*1.15;
+                this.trail = this.trail.filter(p => p.life > 0);
+            }
+            drawAurora(t){
+                const theme = this.getTheme();
+                const A = theme.aurora;
+                const strength = CFG.auroraStrength || 1.0;
+
+                const spr = this.getSprite();
+                const bob = Math.sin(t*1.3 + this.phase) * 6;
+                const px = this.x + mouse.x*16;
+                const py = this.y + bob + mouse.y*8;
+
+                const sx = px + spr.width*this.scale - 170*this.scale;
+                const sy = py + 175*this.scale;
+
+                const len = 780*this.scale;
+                const steps = 34;
+
+                const pts = [];
+                for (let i=0;i<=steps;i++){
+                    const u = i/steps;
+                    const x = sx + len*(1-u);
+                    const wob = Math.sin(t*0.9 + this.phase + i*0.52) * (32*this.scale) * (0.30 + 0.70*(1-u));
+                    const y = sy + wob + Math.sin(t*0.5 + this.phase)*5*this.scale;
+                    pts.push({x,y,u});
+                }
+
+                const layers = [
+                    {w: 70, a: 0.07, c0: A[2], c1: A[0]},
+                    {w: 44, a: 0.10, c0: A[0], c1: A[1]},
+                    {w: 26, a: 0.14, c0: A[3], c1: A[2]},
+                ];
+
+                ctx.globalCompositeOperation = 'screen';
+                for (const L of layers){
+                    const w = L.w * this.scale * strength;
+
+                    const grad = ctx.createLinearGradient(pts[pts.length-1].x, 0, pts[0].x, 0);
+                    grad.addColorStop(0.00, `${L.c0}0)`);
+                    grad.addColorStop(0.18, `${L.c0}${(L.a*0.9).toFixed(3)})`);
+                    grad.addColorStop(0.62, `${L.c1}${(L.a*1.0).toFixed(3)})`);
+                    grad.addColorStop(1.00, `${L.c1}0)`);
+
+                    ctx.strokeStyle = grad;
+                    ctx.lineWidth = w;
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+                    ctx.globalAlpha = 1;
+
+                    ctx.beginPath();
+                    ctx.moveTo(pts[0].x, pts[0].y);
+                    for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+                    ctx.stroke();
+                }
+            }
+            draw(t, trailSpr){
+                const spr = this.getSprite();
+                const bob = Math.sin(t*1.3 + this.phase) * 6;
+                const px = this.x + mouse.x*16;
+                const py = this.y + bob + mouse.y*8;
+
+                this.drawAurora(t);
+
+                ctx.globalCompositeOperation='lighter';
+                for (const p of this.trail){
+                    const a = p.life;
+                    const s = (0.55 + 0.45*a) * this.scale * 60;
+                    ctx.globalAlpha = 0.14*a;
+                    ctx.drawImage(trailSpr, p.x-s, p.y-s, s*2, s*2);
+                }
+
+                ctx.globalCompositeOperation='lighter';
+                ctx.globalAlpha = 0.08;
+                ctx.drawImage(spr, px+22, py-6, spr.width*this.scale+16, spr.height*this.scale+8);
+
+                ctx.globalCompositeOperation='source-over';
+                ctx.globalAlpha = 0.96;
+                ctx.drawImage(spr, px, py, spr.width*this.scale, spr.height*this.scale);
+            }
+        }
+
+        const sleighs = [];
+        function rebuildSleighs(){
+            const want = CFG.skySleighCount || 1;
+            while (sleighs.length < want) sleighs.push(new SkySleigh(() => mats.sleighSpr, () => theme));
+            sleighs.length = want;
+            for (const s of sleighs) s.reset(true);
+        }
+
+        // ===== Tree data =====
+        const bodyLayers = [];
+        const needles = [];
+        const stringA = [];
+        const stringB = [];
+        const bulbs = [];
+        const orbs = [];
+        const treeSnow = [];
+        const gifts = [];
+        let topStar = {x:0,y:CFG.yTop-26,z:0};
+
+        function initTree(){
+            theme = THEMES[themeName];
+            mats = buildMats();
+
+            bodyLayers.length = needles.length = stringA.length = stringB.length = bulbs.length = orbs.length = 0;
+            treeSnow.length = gifts.length = 0;
+            // ✅ 不清空 photoFrames：保持已加载图片，但重新随机位置
+            photoFrames.length = 0;
+
+            const layers = CFG.layers;
+            const yTop = CFG.yTop;
+            const yStep = CFG.yStep;
+            const maxR = CFG.maxRadius;
+
+            for(let i=0;i<layers;i++){
+                const t=i/(layers-1);
+                const y=yTop + i*yStep;
+                const ease = Math.pow(t, 1.35);
+                const r = 12 + maxR * ease;
+
+                bodyLayers.push({ y, r, a: CFG.bodyAlpha*(0.55+0.45*t) });
+
+                const count = Math.floor(16 + i*0.75);
+                for(let j=0;j<count;j++){
+                    const a = (Math.PI*2/count)*j + i*0.14;
+                    const surfaceR = r * (0.84 + 0.16*Math.random());
+                    const x = Math.cos(a) * (surfaceR + rand(-5,5)*(0.2+t));
+                    const z = Math.sin(a) * (surfaceR + rand(-5,5)*(0.2+t));
+
+                    const baseLen = rand(CFG.needleLenMin, CFG.needleLenMax)*(0.65+0.55*t);
+                    for(let n=0;n<CFG.needlePerPoint;n++){
+                        const twist = rand(-0.28,0.28);
+                        const ang = a + twist;
+                        const len = baseLen * rand(0.75, 1.05);
+                        const x2 = x + Math.cos(ang)*len;
+                        const y2 = y - len*(0.22 + rand(0,0.20));
+                        const z2 = z + Math.sin(ang)*len;
+
+                        const hh = rand(theme.leafHue[0], theme.leafHue[1]);
+                        const ss = rand(theme.leafSat[0], theme.leafSat[1]);
+                        const ll = rand(theme.leafLum[0], theme.leafLum[1]);
+                        needles.push({x1:x,y1:y,z1:z,x2,y2,z2, h:hh,s:ss,l:ll, a:CFG.needleAlpha*(0.6+0.4*Math.random())});
+                    }
+
+                    if (i>10 && Math.random() < CFG.ornamentDensity*(0.25+t) && (j%3===0)){
+                        orbs.push({
+                            x: x*rand(0.78,0.96),
+                            y: y + rand(-4,4),
+                            z: z*rand(0.78,0.96),
+                            mat: pick(mats.orbs),
+                            base: rand(0.9,1.15)
+                        });
+                    }
+                }
+
+                if(i>4){
+                    const a1 = i*0.28;
+                    const a2 = i*0.28 + Math.PI;
+                    stringA.push({ x:Math.cos(a1)*r*0.92, y, z:Math.sin(a1)*r*0.92 });
+                    stringB.push({ x:Math.cos(a2)*r*0.92, y, z:Math.sin(a2)*r*0.92 });
+
+                    if (Math.random() < CFG.lightDensity*(0.3+t)){
+                        const p = (Math.random()<0.5) ? stringA[stringA.length-1] : stringB[stringB.length-1];
+                        bulbs.push({
+                            x:p.x, y:p.y+rand(-1.5,1.5), z:p.z,
+                            mat: pick(mats.lights),
+                            phase: rand(0,6.28),
+                            sp: rand(1.6,3.3),
+                            base: rand(0.85,1.25)
+                        });
+                    }
+                }
+            }
+
+            for(let k=0;k<CFG.treeSnowCount;k++){
+                const i = Math.floor(rand(6, layers-2));
+                const t=i/(layers-1);
+                const y=yTop + i*yStep + rand(-2.2, 2.2);
+                const ease = Math.pow(t, 1.35);
+                const r = (12 + maxR * ease) * rand(0.90, 1.02);
+                const a = rand(0, Math.PI*2);
+                const x = Math.cos(a) * r;
+                const z = Math.sin(a) * r;
+                treeSnow.push({ x, y: y - rand(0.5, 3.8), z, base: rand(0.7, 1.5)*(0.5+0.7*t), phase: rand(0,6.28) });
+            }
+
+            for(let g=0; g<CFG.giftCount; g++){
+                const i = Math.floor(rand(layers*0.35, layers*0.92));
+                const t=i/(layers-1);
+                const y=yTop + i*yStep + rand(-3,3);
+                const ease = Math.pow(t, 1.35);
+                const r = (12 + maxR * ease) * rand(0.72, 0.90);
+                const a = rand(0, Math.PI*2);
+                const x = Math.cos(a)*r;
+                const z = Math.sin(a)*r;
+                gifts.push({
+                    x, y, z, hookY: y - rand(10, 22),
+                    base: rand(0.85, 1.25)*(0.75+0.45*t),
+                    phase: rand(0,6.28),
+                    rot: rand(-0.25, 0.25),
+                    spr: pick(mats.giftSpr)
+                });
+            }
+
+            // ✅ 将已加载的 5 张照片随机挂到树上
+            if (loadedPhotos.length){
+                const imgs = loadedPhotos.slice(0,5);
+                for (const img of imgs){
+                    const i = Math.floor(rand(layers*0.42, layers*0.90)); // 中下部更好看
+                    const t=i/(layers-1);
+                    const y=yTop + i*yStep + rand(-6,6);
+                    const ease = Math.pow(t, 1.35);
+                    const r = (12 + maxR * ease) * rand(0.62, 0.86);
+                    const a = rand(0, Math.PI*2);
+                    const x = Math.cos(a)*r;
+                    const z = Math.sin(a)*r;
+
+                    photoFrames.push({
+                        img,
+                        x, y, z,
+                        hookY: y - rand(16, 26),
+                        base: rand(0.95, 1.18) * (0.8 + 0.55*t),
+                        phase: rand(0, 6.28),
+                        rot: rand(-0.18, 0.18)
+                    });
+                }
+            }
+
+            topStar = {x:0,y:yTop-26,z:0};
+            rebuildSleighs();
+        }
+
+        // ===== 默认加载 5 张（同目录 p1.jpg~p5.jpg）；加载失败不报错 =====
+        let loadedPhotos = [];
+        async function tryLoadDefaultPhotos(){
+            const urls = ['p1.jpg','p2.jpg','p3.jpg','p4.jpg','p5.jpg'];
+            try{
+                const imgs = await Promise.all(urls.map(u => loadImage(u)));
+                loadedPhotos = imgs;
+                initTree();
+            }catch(e){
+                // 默认图不存在就忽略，让用户用“加载照片”
+                // console.warn(e);
+            }
+        }
+
+        // ===== 用户选择 5 张照片 =====
+        const btnLoad = document.getElementById('btnLoad');
+        const picker = document.getElementById('photoPicker');
+        btnLoad.addEventListener('click', ()=>picker.click());
+        picker.addEventListener('change', async (e)=>{
+            const files = Array.from(e.target.files || []).slice(0,5);
+            if (!files.length) return;
+            const urls = files.map(f => URL.createObjectURL(f));
+            try{
+                const imgs = await Promise.all(urls.map(u => loadImage(u)));
+                loadedPhotos = imgs;
+                initTree();
+            }finally{
+                // 释放 objectURL（避免占内存）
+                setTimeout(()=>urls.forEach(u=>URL.revokeObjectURL(u)), 10_000);
+            }
+        });
+
+        // ===== 点击：命中照片 → 放大；否则切换主题 =====
+        canvas.addEventListener('click', (e)=>{
+            if (viewer.classList.contains('show')) return;
+
+            const x = e.clientX;
+            const y = e.clientY;
+
+            // 命中检测：取“最近的”(scale 最大)
+            let hit = null;
+            for (const r of photoRects){
+                if (x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h){
+                    if (!hit || r.s > hit.s) hit = r;
+                }
+            }
+            if (hit){
+                openViewer(hit.src);
+                return;
+            }
+
+            // 没点到照片才切主题
+            themeName = (themeName === 'classic') ? 'romantic' : 'classic';
+            initTree();
+        });
+
+        // ===== 画面循环 =====
+        let tt=0;
+        function frame(){
+            tt += 0.016;
+            mouse.x += (mouse.tx-mouse.x)*0.06;
+            mouse.y += (mouse.ty-mouse.y)*0.06;
+
+            cam.rotY += 0.0037 + mouse.x*0.0022;
+            cam.rotX  = -mouse.y*0.10 + Math.sin(tt*0.18)*0.02;
+
+            ctx.clearRect(0,0,W,H);
+
+            drawBackground(tt);
+
+            for (const s of sleighs){
+                s.update(tt, 0.016);
+                s.draw(tt, mats.trailSpr);
+            }
+
+            // 树体积
+            ctx.globalCompositeOperation='source-over';
+            for(const L of bodyLayers){
+                const c = project(0, L.y, 0);
+                if(c.s<=0) continue;
+                const rx = L.r * c.s * 0.70;
+                const ry = rx * 0.52;
+                fillScaledEllipse(c.x, c.y, rx, ry, 'rgba(10, 90, 55, 1)', L.a*clamp(c.s*1.2,0,1));
+            }
+
+            // 针叶
+            ctx.lineCap='round';
+            for(const n of needles){
+                const p1 = project(n.x1,n.y1,n.z1);
+                const p2 = project(n.x2,n.y2,n.z2);
+                if(p1.s<=0 || p2.s<=0) continue;
+                const s = Math.min(p1.s, p2.s);
+                const fog = clamp(s*1.1, 0.12, 1);
+                ctx.globalAlpha = n.a * fog;
+                ctx.strokeStyle = `hsla(${n.h}, ${n.s}%, ${n.l}%, 1)`;
+                ctx.lineWidth = Math.max(0.6, 1.35*s);
+                ctx.beginPath(); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
+            }
+
+            // 树上积雪（z 排序）
+            const snowDraw = [];
+            for(const s0 of treeSnow){
+                const p = project(s0.x, s0.y, s0.z);
+                if(p.s<=0) continue;
+                snowDraw.push({z:p.z, p, s0});
+            }
+            snowDraw.sort((a,b)=>a.z-b.z);
+            ctx.globalCompositeOperation='source-over';
+            for(const it of snowDraw){
+                const p = it.p, s0 = it.s0;
+                const fog = clamp(p.s*1.15, 0.10, 1);
+                const tw = 0.85 + 0.15*Math.sin(tt*1.2 + s0.phase);
+                const size = s0.base * p.s * 18 * (0.85 + 0.15*tw);
+                ctx.globalAlpha = 0.55 * fog;
+                ctx.drawImage(mats.snowSpr, p.x-size, p.y-size, size*2, size*2);
+            }
+
+            // 灯串线
+            ctx.globalCompositeOperation='screen';
+            ctx.globalAlpha = 0.95;
+            drawString(stringA, theme.string);
+            drawString(stringB, theme.string);
+
+            // 装饰球
+            ctx.globalCompositeOperation='source-over';
+            const orbDraw = [];
+            for(const o of orbs){
+                const p=project(o.x,o.y,o.z);
+                if(p.s<=0) continue;
+                orbDraw.push({z:p.z, p, o});
+            }
+            orbDraw.sort((a,b)=>a.z-b.z);
+            for(const it of orbDraw){
+                const p=it.p, o=it.o;
+                const fog = clamp(p.s, 0.12, 1);
+                const size = o.base * p.s * CFG.ornamentSize;
+                ctx.globalAlpha = 0.95*fog;
+                ctx.drawImage(o.mat.spr, p.x-size, p.y-size, size*2, size*2);
+            }
+
+            // 礼物盒（挂线+本体）
+            const giftDraw = [];
+            for(const g of gifts){
+                const p=project(g.x,g.y,g.z);
+                if(p.s<=0) continue;
+                giftDraw.push({z:p.z, p, g});
+            }
+            giftDraw.sort((a,b)=>a.z-b.z);
+
+            ctx.globalCompositeOperation='source-over';
+            ctx.strokeStyle='rgba(255,255,255,0.25)';
+            ctx.lineWidth=1;
+            for(const it of giftDraw){
+                const g=it.g;
+                const p1 = project(g.x, g.hookY, g.z);
+                const p2 = it.p;
+                if(p1.s<=0 || p2.s<=0) continue;
+                ctx.globalAlpha = 0.55*clamp(Math.min(p1.s,p2.s), 0.12, 1);
+                ctx.beginPath(); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
+            }
+            for(const it of giftDraw){
+                const p=it.p, g=it.g;
+                const fog = clamp(p.s, 0.12, 1);
+                const swing = Math.sin(tt*1.0 + g.phase) * 0.18;
+                const size = g.base * p.s * 26;
+                ctx.save();
+                ctx.translate(p.x, p.y);
+                ctx.rotate(g.rot + swing);
+                ctx.globalAlpha = 0.92*fog;
+                ctx.drawImage(g.spr, -size, -size, size*2, size*2);
+                ctx.restore();
+            }
+
+            // ✅ 照片挂件（挂线 + 相框），并更新 photoRects 供点击命中
+            photoRects = [];
+            const photoDraw = [];
+            for (const ph of photoFrames){
+                const p = project(ph.x, ph.y, ph.z);
+                if (p.s<=0) continue;
+                photoDraw.push({z:p.z, p, ph});
+            }
+            photoDraw.sort((a,b)=>a.z-b.z);
+
+            // 挂线
+            ctx.globalCompositeOperation='source-over';
+            ctx.strokeStyle='rgba(255,255,255,0.30)';
+            ctx.lineWidth=1;
+            for (const it of photoDraw){
+                const ph = it.ph;
+                const p1 = project(ph.x, ph.hookY, ph.z);
+                const p2 = it.p;
+                if (p1.s<=0 || p2.s<=0) continue;
+                ctx.globalAlpha = 0.70*clamp(Math.min(p1.s,p2.s), 0.12, 1);
+                ctx.beginPath(); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
+            }
+
+            // 相框
+            for (const it of photoDraw){
+                const p = it.p, ph = it.ph;
+                const fog = clamp(p.s, 0.12, 1);
+                const swing = Math.sin(tt*0.95 + ph.phase) * 0.16;
+                const tilt = ph.rot + swing;
+
+                // 宽高比例：限制在 3:4 ~ 4:3，避免太瘦
+                const rawRatio = ph.img.width / ph.img.height;
+                const ratio = clamp(rawRatio, 0.75, 1.33);
+
+                // 基础尺寸随深度变化
+                const maxSide = clamp(ph.base * p.s * CFG.photoBase, 28, 110);
+
+                let w, h;
+                if (ratio >= 1){
+                    w = maxSide * 1.05;
+                    h = w / ratio;
+                }else{
+                    h = maxSide * 1.05;
+                    w = h * ratio;
+                }
+                // 给一点“框感”，整体再放大一点
+                w *= 1.15; h *= 1.15;
+
+                // 画框
+                drawPhotoFrame(ph.img, p.x, p.y, w, h, 0.95*fog, tilt, 0.9);
+
+                // 存点击矩形（旋转忽略，足够好用）
+                photoRects.push({ x: p.x-w/2, y: p.y-h/2, w, h, s: p.s, src: ph.img.src });
+            }
+
+            // 灯泡
+            ctx.globalCompositeOperation='lighter';
+            for(const L of bulbs){
+                const p=project(L.x,L.y,L.z);
+                if(p.s<=0) continue;
+                const fog = clamp(p.s, 0.12, 1);
+                const tw  = 0.6 + 0.4*Math.sin(tt*L.sp + L.phase);
+                const size = L.base * p.s * CFG.lightSize;
+                ctx.globalAlpha = 0.55*fog*(0.65+0.35*tw);
+                ctx.drawImage(L.mat.spr, p.x-size, p.y-size, size*2, size*2);
+            }
+
+            // 顶星
+            const sp = project(0, CFG.yTop-26, 0);
+            if(sp.s>0) drawStar(sp, tt);
+
+            requestAnimationFrame(frame);
+        }
+
+        // ===== 启动 =====
+        resize();
+        initTree();
+        tryLoadDefaultPhotos();
+        requestAnimationFrame(frame);
+    })();
+</script>
+</body>
+</html>
