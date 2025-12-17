@@ -103,11 +103,11 @@
         }
 
         function loadImage(src){
-            return new Promise((resolve,reject)=>{
+            return new Promise((resolve, reject) => {
                 const img = new Image();
-                img.crossOrigin = 'anonymous';
-                img.onload = ()=>resolve(img);
-                img.onerror = ()=>reject(new Error('load failed: ' + src));
+                img.crossOrigin = "anonymous";
+                img.onload = () => resolve(img);
+                img.onerror = (e) => reject({src, e});
                 img.src = src;
             });
         }
@@ -871,16 +871,20 @@
         // ===== 默认加载 5 张（同目录 p1.jpg~p5.jpg）；加载失败不报错 =====
         let loadedPhotos = [];
         async function tryLoadDefaultPhotos(){
-            const urls = ['./p1.jpg','./p2.jpg','./p3.jpg','./p4.jpg','./p5.jpg'];
-            try{
-                const imgs = await Promise.all(urls.map(u => loadImage(u)));
-                loadedPhotos = imgs;
-                initTree();
-            }catch(e){
-                // 默认图不存在就忽略，让用户用“加载照片”
-                // console.warn(e);
-            }
+            const urls = ["p1.jpg","p2.jpg","p3.jpg","p4.jpg","p5.jpg"]
+                .map(n => new URL(n, location.href).toString());
+
+            const res = await Promise.allSettled(urls.map(u => loadImage(u)));
+
+            const ok = res.filter(r => r.status === "fulfilled").map(r => r.value);
+            const bad = res.filter(r => r.status === "rejected").map(r => r.reason);
+
+            if (bad.length) console.warn("Some photos failed to load:", bad);
+
+            loadedPhotos = ok;
+            if (loadedPhotos.length) initTree();
         }
+
 
         // ===== 用户选择 5 张照片 =====
         const btnLoad = document.getElementById('btnLoad');
